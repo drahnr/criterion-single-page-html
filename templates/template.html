@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+<style>
+  
+section {
+  display: none;
+}
+section:target {
+  display: block;
+}
+
+nav,
+nav ul {
+  display: flex;
+  flex-flow: row wrap;
+}
+
+nav {
+  background: #d2c20c;
+  color: #372121;
+  padding: 1em;
+  position: sticky;
+  top: 0;
+}
+
+nav ul {
+  list-style: none;
+  margin: 0;
+}
+
+nav li {
+  margin-right: 1em;
+}
+
+nav li a {
+  color: paleturquoise;
+}
+
+</style>
+</head>
+
+<body>
+
+  <nav>
+    <ul>
+{% for x in pages %}
+      <li><a href="#{{ x.link }}">{{ x.title }}</a></li>
+{% endfor %}
+    </ul>
+  </nav>
+
+{% for x in pages %}
+<section id="{{x.link}}">
+  <!-- {{ x.title }} content goes here -->
+  {{ x.content }}
+</section>
+{% endfor %}
+
+</html>
