@@ -1,10 +1,13 @@
 [package]
 name = "criterion-single-page-html"
-version = "0.1.0"
+version = "0.0.1"
 edition = "2021"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
+author = "Bernhard Schuster <bernhard@ahoi.io>"
+license = "MIT OR Apache-2.0 OR MPL-2.0"
+repository = "https://github.com/drahnr/criterion-single-page-html"
+description = "Collect criterion generated html files and provide them as a single html file, servable from s3 into your browser."
+keywords = ["single", "html", "criterion", "onepage", "s3"]
+categories = ["command-line-utilities", "development-tools::profiling"]
 [dependencies]
 askama = { version = "0.12.0", features = ["serde", "serde-yaml"] }
 base64 = "0.21.3"
