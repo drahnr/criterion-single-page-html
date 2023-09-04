@@ -2,22 +2,20 @@ use askama::Template;
 use clap::Parser;
 use color_eyre::eyre::Result;
 use fs_err as fs;
-use html5ever::serialize::HtmlSerializer;
+
 use html5ever::tendril::{StrTendril, TendrilSink};
 use html5ever::tree_builder::QuirksMode;
 use html5ever::{Attribute, ParseOpts};
 use markup5ever_rcdom::{Node, NodeData, RcDom};
-use sha2::digest::generic_array::{ArrayLength, GenericArray};
+use sha2::digest::generic_array::GenericArray;
 use sha2::digest::typenum::U32;
 use sha2::digest::Update;
 use sha2::Digest;
 use sha2::Sha256;
-use std::collections::hash_map::{Entry, VacantEntry};
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
-use std::ops::{Deref, DerefMut};
+
+use std::collections::{HashMap, VecDeque};
+
 use std::path::PathBuf;
-use std::thread::current;
 
 #[derive(Debug, clap::Parser)]
 struct CliArgs {
@@ -36,7 +34,9 @@ pub fn create_data_url(media_type: &str, charset: &str, data: &[u8]) -> String {
     } else {
         "".to_string()
     };
-    format!("data:{}{};base64,{}", media_type, c, base64::encode(data))
+    let encoder = base64::engine::general_purpose::STANDARD_NO_PAD;
+    let encoded = base64::engine::Engine::encode(&encoder, data);
+    format!("data:{}{};base64,{}", media_type, c, encoded)
 }
 
 pub fn node_to_content(node: std::rc::Rc<Node>) -> Result<String> {
@@ -54,7 +54,7 @@ pub fn load_string_from_disk(
     search_context: &std::path::Path,
     value: &StrTendril,
 ) -> Result<String> {
-    let value = String::from(&*value);
+    let value = String::from(value);
     let p = search_context.join(&value);
     log::info!("Loading {}  /^\\  {} ", search_context.display(), value);
     let s = fs::read_to_string(p)?;
@@ -101,9 +101,9 @@ fn process_html_page(
     opts.tree_builder.quirks_mode = QuirksMode::NoQuirks;
     opts.tree_builder.scripting_enabled = false;
 
-    let content = fs::read_to_string(&current_html_file)?;
+    let content = fs::read_to_string(current_html_file)?;
     let mut cursor = std::io::Cursor::new(content);
-    let mut sink = RcDom::default();
+    let sink = RcDom::default();
     let doc: RcDom = html5ever::parse_document::<RcDom>(sink, opts)
         .from_utf8()
         .read_from(&mut cursor)?;
@@ -153,22 +153,21 @@ fn process_html_page(
         );
     };
     let content = node_to_content(node.clone())?;
-    let content = content.as_str();
+    let _content = content.as_str();
 
     let section_root_node = node.clone();
     queue.push_back(node);
     assert_eq!(queue.len(), 1);
 
     let title = maybe_title
-        .map(|title: String| title.rsplit_once("-").map(|(a, _b)| a.to_owned()))
-        .flatten()
+        .and_then(|title: String| title.rsplit_once('-').map(|(a, _b)| a.to_owned()))
         .unwrap_or("???".to_owned());
 
     while let Some(node) = queue.pop_back() {
         match &node.data {
             NodeData::Document => unreachable!(),
 
-            NodeData::Text { ref contents } => {}
+            NodeData::Text { contents: _ } => {}
 
             NodeData::Element {
                 ref name,
@@ -185,12 +184,12 @@ fn process_html_page(
 
                 // get src
                 if let Some(Attribute {
-                    name: attr_name,
+                    name: _attr_name,
                     value: ref mut uri,
                 }) = attrs
                     .borrow_mut()
                     .iter_mut()
-                    .find(|Attribute { name, value }| name.local.as_ref() == "src")
+                    .find(|Attribute { name, value: _ }| name.local.as_ref() == "src")
                 {
                     // maintain only local links, anything that is point to some http service will be ignored
                     if uri.starts_with("http") {
@@ -202,7 +201,7 @@ fn process_html_page(
                     }
 
                     match name.local.as_ref() {
-                        "img" => match load_string_from_disk(&search_context, uri) {
+                        "img" => match load_string_from_disk(search_context, uri) {
                             Ok(data) => {
                                 let media_type = if uri.ends_with("svg") {
                                     "image/svg+xml"
@@ -225,12 +224,12 @@ fn process_html_page(
 
                 // get href
                 if let Some(Attribute {
-                    name: attr_name,
+                    name: _attr_name,
                     value: ref mut uri,
                 }) = attrs
                     .borrow_mut()
                     .iter_mut()
-                    .find(|Attribute { name, value }| name.local.as_ref() == "href")
+                    .find(|Attribute { name, value: _ }| name.local.as_ref() == "href")
                 {
                     // maintain only local links, anything that is point to some http service will be ignored
                     if uri.starts_with("http") {
@@ -275,9 +274,9 @@ fn process_html_page(
 
                                     *uri = format!("#{}", &linked_page_id).as_str().into();
 
-                                    /// svgs can be linked, but we want to inline them as separate pages without traversal, for now we create a data link
+                                    // svgs can be linked, but we want to inline them as separate pages without traversal, for now we create a data link
                                     if let Some("svg") =
-                                        child_linked.extension().map(|x| x.to_str()).flatten()
+                                        child_linked.extension().and_then(|x| x.to_str())
                                     {
                                         pages.insert(
                                             linked_page_id,
@@ -303,7 +302,7 @@ fn process_html_page(
                                                 .as_path()
                                                 .join(child_linked.as_path())
                                                 .as_path(),
-                                            &search_context,
+                                            search_context,
                                             pages,
                                         )?;
                                         pages.insert(linked_page_id, modified_page);
@@ -336,10 +335,6 @@ fn process_html_page(
     })
 }
 
-fn foo(digest: DigestVal) -> String {
-    format!("{:?}", digest.as_slice())
-}
-
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub(crate) struct PageId {
     digest: DigestVal,
@@ -364,13 +359,13 @@ impl serde::ser::Serialize for PageId {
     where
         S: serde::Serializer,
     {
-        serializer.collect_str(hex::encode(&self.digest).as_str())
+        serializer.collect_str(hex::encode(self.digest).as_str())
     }
 }
 
 impl std::fmt::Display for PageId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", hex::encode(&self.digest))
+        write!(f, "{}", hex::encode(self.digest))
     }
 }
 
@@ -400,14 +395,14 @@ fn main() -> Result<()> {
     let CliArgs { root, dest, .. } = CliArgs::parse();
 
     let mut pages = HashMap::new();
-    let content = fs::read_to_string(&root)?;
+    let _content = fs::read_to_string(&root)?;
 
-    let cwd = std::env::current_dir()?;
+    let _cwd = std::env::current_dir()?;
     let x = root.parent().unwrap();
-    process_html_page(&x, &root, &x, &mut pages)?;
+    process_html_page(x, &root, x, &mut pages)?;
 
     let pages = Vec::from_iter(pages.into_iter().map(|(digest, page)| {
-        let page_id = PageId::from(digest.clone());
+        let page_id = digest.clone();
         RenderItem {
             linkmarker: page_id.clone(),
             page,
