@@ -3,7 +3,12 @@
 
 <head>
 <style>
-  
+
+body {
+  padding: 0;
+  margin: 0;
+}
+
 section {
   display: none;
 }
@@ -18,8 +23,8 @@ nav ul {
 }
 
 nav {
-  background: #d2c20c;
-  color: #372121;
+  background: #fad8d1;
+  color: #590f00;
   padding: 1em;
   position: sticky;
   top: 0;
@@ -35,7 +40,7 @@ nav li {
 }
 
 nav li a {
-  color: paleturquoise;
+  color: #590f00;
 }
 
 </style>
@@ -46,16 +51,17 @@ nav li a {
   <nav>
     <ul>
 {% for x in pages %}
-      <li><a href="#{{ x.link }}">{{ x.title }}</a></li>
+      <li><a href="#{{ x.linkmarker }}">{{ x.page.title }}</a></li>
 {% endfor %}
     </ul>
   </nav>
-
+  
 {% for x in pages %}
-<section id="{{x.link}}">
-  <!-- {{ x.title }} content goes here -->
-  {{ x.content }}
+<section id="{{ x.linkmarker }}">
+  <!-- {{ x.page.title }} content goes here -->
+  {{ x.page.content }}
 </section>
 {% endfor %}
 
+</body>
 </html>

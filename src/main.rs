@@ -1,7 +1,6 @@
 use askama::Template;
 use clap::Parser;
 use color_eyre::eyre::Result;
-use color_eyre::owo_colors::OwoColorize;
 use fs_err as fs;
 use html5ever::serialize::HtmlSerializer;
 use html5ever::tendril::{StrTendril, TendrilSink};
@@ -37,7 +36,7 @@ pub fn create_data_url(media_type: &str, charset: &str, data: &[u8]) -> String {
     } else {
         "".to_string()
     };
-    format!("data:,{}{};base64,{}", media_type, c, base64::encode(data))
+    format!("data:{}{};base64,{}", media_type, c, base64::encode(data))
 }
 
 pub fn node_to_content(node: std::rc::Rc<Node>) -> Result<String> {
@@ -64,13 +63,19 @@ pub fn load_string_from_disk(
 
 pub type DigestVal = GenericArray<u8, U32>;
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PageWrapping {
+    title: String,
+    content: String,
+}
+
 /// Parse the page and replace.
-fn process_page(
+fn process_html_page(
     rootbase: &std::path::Path,
     current_html_file: &std::path::Path,
     parent_search_context: &std::path::Path,
-    pages: &mut HashMap<PageId, String>,
-) -> Result<String> {
+    pages: &mut HashMap<PageId, PageWrapping>,
+) -> Result<PageWrapping> {
     let search_context = if let Some(current_base) = current_html_file.parent() {
         if current_base.is_relative() {
             parent_search_context.join(current_base)
@@ -103,11 +108,33 @@ fn process_page(
         .from_utf8()
         .read_from(&mut cursor)?;
 
+    let mut maybe_title = None;
+
     let mut queue = VecDeque::from_iter(doc.document.children.clone().into_inner().into_iter());
-    'search: while let Some(node) = queue.pop_front() {
+    'search: while let Some(node) = queue.pop_back() {
+        // use depth first, otherwise we won't find a title.
         match &node.data {
-            NodeData::Element { ref name, .. } => {
-                if name.local.to_string() == "body" {
+            NodeData::Element {
+                ref name,
+                ref template_contents,
+                ..
+            } => {
+                let local = name.local.to_string();
+                if local == "title" {
+                    if let Some(ref x) = *template_contents.borrow() {
+                        if let NodeData::Text {
+                            contents: title_content,
+                        } = dbg!(&x.as_ref().data)
+                        {
+                            log::debug!("Found <title> in file: {}", current_html_file.display());
+                            let title = &*title_content.borrow();
+                            maybe_title.replace(title.into());
+                        }
+                    } else {
+                        log::error!("Found title, but wasn't a simple one")
+                    }
+                }
+                if local == "body" {
                     log::debug!("Found <body> in file: {}", current_html_file.display());
                     queue.clear();
                     queue.push_back(node);
@@ -119,7 +146,7 @@ fn process_page(
         }
     }
 
-    let Some(node) = queue.pop_front() else {
+    let Some(node) = queue.pop_back() else {
         color_eyre::eyre::bail!(
             "Couldn't find <body> in the file: {}",
             current_html_file.display()
@@ -131,6 +158,11 @@ fn process_page(
     let section_root_node = node.clone();
     queue.push_back(node);
     assert_eq!(queue.len(), 1);
+
+    let title = maybe_title
+        .map(|title: String| title.rsplit_once("-").map(|(a, _b)| a.to_owned()))
+        .flatten()
+        .unwrap_or("???".to_owned());
 
     while let Some(node) = queue.pop_back() {
         match &node.data {
@@ -170,12 +202,23 @@ fn process_page(
                     }
 
                     match name.local.as_ref() {
-                        "img" => {
-                            let data = load_string_from_disk(&search_context, uri)?;
-                            let url_content_bas64 = create_data_url("", "UTF-8", data.as_bytes());
-
-                            *uri = url_content_bas64.as_str().into();
-                        }
+                        "img" => match load_string_from_disk(&search_context, uri) {
+                            Ok(data) => {
+                                let media_type = if uri.ends_with("svg") {
+                                    "image/svg+xml"
+                                } else if uri.ends_with("png") {
+                                    "image/png"
+                                } else {
+                                    ""
+                                };
+                                let url_content_bas64 =
+                                    create_data_url(media_type, "UTF-8", data.as_bytes());
+                                *uri = url_content_bas64.as_str().into();
+                            }
+                            Err(err) => {
+                                log::warn!("Couldn't find referenced file, ignoring: {err:?}");
+                            }
+                        },
                         _name => {}
                     }
                 }
@@ -199,64 +242,78 @@ fn process_page(
                     }
 
                     match name.local.as_ref() {
-                        "link" => {
-                            let data = load_string_from_disk(search_context, uri)?;
-
-                            let url_content_bas64 = create_data_url("", "UTF-8", data.as_bytes());
-
-                            *uri = url_content_bas64.as_str().into();
-
-                            let uri = PathBuf::from(String::from(&*uri));
-                            log::info!(
-                                "Loading <link href=\"{}\"> as data with search-ctx=\"{}\"",
-                                uri.display(),
-                                search_context.display()
-                            );
-                        }
-                        "a" => {
-                            let child_linked = PathBuf::from(String::from(&*uri));
-                            let target_html_page_content =
-                                load_string_from_disk(search_context, uri)?;
-                            log::info!("Found outgoing link <a href=\"{}\"> as data with search-ctx=\"{}\"", child_linked.display(), search_context.display());
-
-                            /// svgs can be linked, but we want to inline them as separate pages without traversal, for now we create a data link
-                            if let Some("svg") =
-                                child_linked.extension().map(|x| x.to_str()).flatten()
-                            {
-                                let data = load_string_from_disk(search_context, uri)?;
-
+                        "link" => match load_string_from_disk(search_context, uri) {
+                            Ok(data) => {
                                 let url_content_bas64 =
                                     create_data_url("", "UTF-8", data.as_bytes());
 
                                 *uri = url_content_bas64.as_str().into();
 
-                                continue;
-                            }
-
-                            let linked_page_id = PageId::from_content(&target_html_page_content);
-
-                            *uri = format!("#{}", &linked_page_id).as_str().into();
-
-                            if !pages.contains_key(&linked_page_id) {
-                                log::debug!("Found a new page!");
-
-                                log::warn!("Processing page rootbase=\"{}\" current=\"{}\" search-ctx=\"{}\"",
-                                    rootbase.display(),
-                                    child_linked.display(),
+                                let uri = PathBuf::from(String::from(&*uri));
+                                log::info!(
+                                    "Loading <link href=\"{}\"> as data with search-ctx=\"{}\"",
+                                    uri.display(),
                                     search_context.display()
                                 );
-                                let modified_page = process_page(
-                                    rootbase,
-                                    search_context
-                                        .as_path()
-                                        .join(child_linked.as_path())
-                                        .as_path(),
-                                    &search_context,
-                                    pages,
-                                )?;
-                                pages.insert(linked_page_id, modified_page);
-                            } else {
-                                log::trace!("Page already processed {}", child_linked.display());
+                            }
+                            Err(err) => {
+                                log::warn!("Couldn't find referenced file, ignoring: {err:?}");
+                            }
+                        },
+                        "a" => {
+                            let child_linked = PathBuf::from(String::from(&*uri));
+
+                            match load_string_from_disk(search_context, uri) {
+                                Err(err) => {
+                                    log::warn!("Couldn't find referenced file, ignoring: {err:?}");
+                                }
+                                Ok(target_xml_page_content) => {
+                                    log::info!("Found outgoing link <a href=\"{}\"> as data with search-ctx=\"{}\"", child_linked.display(), search_context.display());
+
+                                    let linked_page_id =
+                                        PageId::from_content(&target_xml_page_content);
+
+                                    *uri = format!("#{}", &linked_page_id).as_str().into();
+
+                                    /// svgs can be linked, but we want to inline them as separate pages without traversal, for now we create a data link
+                                    if let Some("svg") =
+                                        child_linked.extension().map(|x| x.to_str()).flatten()
+                                    {
+                                        pages.insert(
+                                            linked_page_id,
+                                            PageWrapping {
+                                                title: "I am a svg".to_owned(),
+                                                content: target_xml_page_content,
+                                            },
+                                        );
+                                        continue;
+                                    }
+
+                                    if !pages.contains_key(&linked_page_id) {
+                                        log::debug!("Found a new page!");
+
+                                        log::warn!("Processing page rootbase=\"{}\" current=\"{}\" search-ctx=\"{}\"",
+                                            rootbase.display(),
+                                            child_linked.display(),
+                                            search_context.display()
+                                        );
+                                        let modified_page = process_html_page(
+                                            rootbase,
+                                            search_context
+                                                .as_path()
+                                                .join(child_linked.as_path())
+                                                .as_path(),
+                                            &search_context,
+                                            pages,
+                                        )?;
+                                        pages.insert(linked_page_id, modified_page);
+                                    } else {
+                                        log::trace!(
+                                            "Page already processed {}",
+                                            child_linked.display()
+                                        );
+                                    }
+                                }
                             }
                         }
                         _ => continue,
@@ -273,7 +330,10 @@ fn process_page(
     }
 
     let modified_page_content = node_to_content(section_root_node)?;
-    Ok(modified_page_content)
+    Ok(PageWrapping {
+        content: modified_page_content,
+        title: title.to_owned(),
+    })
 }
 
 fn foo(digest: DigestVal) -> String {
@@ -315,17 +375,16 @@ impl std::fmt::Display for PageId {
 }
 
 #[derive(Debug, Clone)]
-struct X {
-    link: PageId,
-    title: String,
-    content: String,
+struct RenderItem {
+    linkmarker: PageId,
+    page: PageWrapping,
 }
 
 #[derive(askama::Template)]
 #[template(path = "template.html", escape = "none")]
 struct Temple {
     /// First page is the root.
-    pages: Vec<X>,
+    pages: Vec<RenderItem>,
 }
 
 fn main() -> Result<()> {
@@ -345,14 +404,13 @@ fn main() -> Result<()> {
 
     let cwd = std::env::current_dir()?;
     let x = root.parent().unwrap();
-    process_page(&x, &root, &x, &mut pages)?;
+    process_html_page(&x, &root, &x, &mut pages)?;
 
-    let pages = Vec::from_iter(pages.into_iter().map(|(digest, content)| {
+    let pages = Vec::from_iter(pages.into_iter().map(|(digest, page)| {
         let page_id = PageId::from(digest.clone());
-        X {
-            link: page_id.clone(),
-            title: page_id.to_string(),
-            content,
+        RenderItem {
+            linkmarker: page_id.clone(),
+            page,
         }
     }));
 
