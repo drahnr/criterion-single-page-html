@@ -12,8 +12,8 @@ use sha2::digest::typenum::U32;
 use sha2::digest::Update;
 use sha2::Digest;
 use sha2::Sha256;
-
 use std::collections::{HashMap, VecDeque};
+use std::rc::Rc;
 
 use std::path::PathBuf;
 
@@ -33,6 +33,7 @@ pub fn create_data_url(media_type: &str, charset: &str, data: &[u8]) -> String {
     format!("data:{}{};base64,{}", media_type, c, encoded)
 }
 
+/// Render the tree given by the `Node` instance.
 pub fn node_to_content(node: std::rc::Rc<Node>) -> Result<String> {
     let mut dest = Vec::with_capacity(1024);
     let handle: markup5ever_rcdom::SerializableHandle = node.into();
@@ -50,9 +51,67 @@ pub fn load_string_from_disk(
 ) -> Result<String> {
     let value = String::from(value);
     let p = search_context.join(&value);
-    log::info!("Loading {}  /^\\  {} ", search_context.display(), value);
+    log::debug!("Loading {}  +  {} ", search_context.display(), value);
     let s = fs::read_to_string(p)?;
     Ok(s)
+}
+
+pub fn extract_title(base: &Rc<Node>) -> Option<String> {
+    let mut maybe_title = None;
+    extract_xml_node(base, |name: &str, nd: &Rc<Node>| {
+        if let "title" | "h1" | "h2" | "h3" = name {
+            match nd.children.borrow().iter().next().map(|node| &node.data) {
+                Some(NodeData::Text { contents }) => {
+                    let cb = dbg!(contents.borrow());
+                    maybe_title.replace(cb.to_string());
+                    return Act::Break;
+                }
+                _x => {}
+            }
+        }
+        Act::Next
+    });
+    maybe_title
+}
+
+pub fn extract_body(base: &Rc<Node>) -> Option<Rc<Node>> {
+    let mut maybe_body = None;
+    extract_xml_node(base, |name: &str, nd: &Rc<Node>| {
+        if let "body" = name {
+            maybe_body.replace(nd.clone());
+            return Act::Break;
+        }
+        Act::Next
+    });
+    maybe_body
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Act {
+    Break,
+    Continue,
+    Next,
+}
+
+pub fn extract_xml_node(base: &Rc<Node>, mut fx: impl FnMut(&'_ str, &Rc<Node>) -> Act) {
+    let mut queue = VecDeque::<Rc<Node>>::new();
+    queue.push_back(base.clone());
+
+    'search: while let Some(node) = queue.pop_back() {
+        // use depth first, otherwise we won't find a title.
+        match &node.data {
+            NodeData::Element { ref name, .. } => {
+                let local = name.local.to_string();
+                match fx(local.as_str(), &node) {
+                    Act::Break => break 'search,
+                    Act::Continue => continue 'search,
+                    Act::Next => {}
+                }
+            }
+            _ => {}
+        }
+        queue.extend(node.children.clone().into_inner().into_iter());
+    }
 }
 
 /// Parse the page and replace.
@@ -62,12 +121,14 @@ fn process_html_page(
     parent_search_context: &std::path::Path,
     pages: &mut HashMap<PageId, PageWrapping>,
 ) -> Result<PageWrapping> {
+    // let relative_to_root = parent_search_context.join(current_html_file);
+    log::trace!(
+        "Updating search context >{}< + >{}< ?",
+        parent_search_context.display(),
+        current_html_file.display()
+    );
     let search_context = if let Some(current_base) = current_html_file.parent() {
-        if current_base.is_relative() {
-            parent_search_context.join(current_base)
-        } else {
-            parent_search_context.to_path_buf()
-        }
+        current_base.to_path_buf()
     } else {
         parent_search_context.to_path_buf()
     };
@@ -90,64 +151,33 @@ fn process_html_page(
     let content = fs::read_to_string(current_html_file)?;
     let mut cursor = std::io::Cursor::new(content);
     let sink = RcDom::default();
-    let doc: RcDom = html5ever::parse_document::<RcDom>(sink, opts)
+    let doc: RcDom = html5ever::parse_document::<RcDom>(sink, opts.clone())
         .from_utf8()
         .read_from(&mut cursor)?;
 
-    let mut maybe_title = None;
+    let maybe_title = extract_title(&doc.document);
 
-    let mut queue = VecDeque::from_iter(doc.document.children.clone().into_inner().into_iter());
-    'search: while let Some(node) = queue.pop_back() {
-        // use depth first, otherwise we won't find a title.
-        match &node.data {
-            NodeData::Element {
-                ref name,
-                ref template_contents,
-                ..
-            } => {
-                let local = name.local.to_string();
-                if local == "title" {
-                    if let Some(ref x) = *template_contents.borrow() {
-                        if let NodeData::Text {
-                            contents: title_content,
-                        } = dbg!(&x.as_ref().data)
-                        {
-                            log::debug!("Found <title> in file: {}", current_html_file.display());
-                            let title = &*title_content.borrow();
-                            maybe_title.replace(title.into());
-                        }
-                    } else {
-                        log::error!("Found title, but wasn't a simple one")
-                    }
-                }
-                if local == "body" {
-                    log::debug!("Found <body> in file: {}", current_html_file.display());
-                    queue.clear();
-                    queue.push_back(node);
-                    break 'search;
-                }
-                queue.extend(node.children.clone().into_inner().into_iter());
-            }
-            _ => {}
-        }
-    }
+    let title = if let Some(title) = maybe_title {
+        log::debug!("Found title: \"{}\"", &title);
+        title
+    } else {
+        log::warn!("Didn't find a title in \"{}\"", current_html_file.display());
+        "Missing title".to_owned()
+    };
 
-    let Some(node) = queue.pop_back() else {
+    let maybe_body = extract_body(&doc.document);
+
+    let Some(node) = maybe_body else {
         color_eyre::eyre::bail!(
             "Couldn't find <body> in the file: {}",
             current_html_file.display()
         );
     };
-    let content = node_to_content(node.clone())?;
-    let _content = content.as_str();
 
     let section_root_node = node.clone();
+    let mut queue = VecDeque::<Rc<Node>>::new();
     queue.push_back(node);
     assert_eq!(queue.len(), 1);
-
-    let title = maybe_title
-        .and_then(|title: String| title.rsplit_once('-').map(|(a, _b)| a.to_owned()))
-        .unwrap_or("???".to_owned());
 
     while let Some(node) = queue.pop_back() {
         match &node.data {
@@ -163,7 +193,7 @@ fn process_html_page(
             } => {
                 if let Some(inner) = template_contents.borrow().clone() {
                     queue.push_back(inner.clone());
-                    log::info!("Add template inner contents");
+                    log::trace!("Add template inner contents");
                 }
 
                 queue.extend(node.children.clone().into_inner().into_iter());
@@ -264,10 +294,24 @@ fn process_html_page(
                                     if let Some("svg") =
                                         child_linked.extension().and_then(|x| x.to_str())
                                     {
+                                        let maybe_title = {
+                                            let mut cursor = std::io::Cursor::new(
+                                                target_xml_page_content.as_str(),
+                                            );
+                                            let sink = RcDom::default();
+                                            let doc: RcDom = html5ever::parse_document::<RcDom>(
+                                                sink,
+                                                opts.clone(),
+                                            )
+                                            .from_utf8()
+                                            .read_from(&mut cursor)?;
+
+                                            extract_title(&doc.document)
+                                        };
                                         pages.insert(
                                             linked_page_id,
                                             PageWrapping {
-                                                title: "I am a svg".to_owned(),
+                                                title: maybe_title.unwrap_or("Unknown".to_owned()),
                                                 content: target_xml_page_content,
                                             },
                                         );
@@ -275,9 +319,7 @@ fn process_html_page(
                                     }
 
                                     if !pages.contains_key(&linked_page_id) {
-                                        log::debug!("Found a new page!");
-
-                                        log::warn!("Processing page rootbase=\"{}\" current=\"{}\" search-ctx=\"{}\"",
+                                        log::debug!("Found a new page! rootbase=\"{}\" current=\"{}\" search-ctx=\"{}\"",
                                             rootbase.display(),
                                             child_linked.display(),
                                             search_context.display()
@@ -293,7 +335,7 @@ fn process_html_page(
                                         )?;
                                         pages.insert(linked_page_id, modified_page);
                                     } else {
-                                        log::trace!(
+                                        log::debug!(
                                             "Page already processed {}",
                                             child_linked.display()
                                         );
