@@ -17,14 +17,8 @@ use std::collections::{HashMap, VecDeque};
 
 use std::path::PathBuf;
 
-#[derive(Debug, clap::Parser)]
-struct CliArgs {
-    #[arg(long)]
-    root: PathBuf,
-
-    #[clap(long, env = "DEST")]
-    dest: PathBuf,
-}
+mod types;
+use crate::types::*;
 
 /// Create a data url with the given charset.
 pub fn create_data_url(media_type: &str, charset: &str, data: &[u8]) -> String {
@@ -59,14 +53,6 @@ pub fn load_string_from_disk(
     log::info!("Loading {}  /^\\  {} ", search_context.display(), value);
     let s = fs::read_to_string(p)?;
     Ok(s)
-}
-
-pub type DigestVal = GenericArray<u8, U32>;
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct PageWrapping {
-    title: String,
-    content: String,
 }
 
 /// Parse the page and replace.
@@ -333,53 +319,6 @@ fn process_html_page(
         content: modified_page_content,
         title: title.to_owned(),
     })
-}
-
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
-pub(crate) struct PageId {
-    digest: DigestVal,
-}
-
-impl From<DigestVal> for PageId {
-    fn from(digest: DigestVal) -> Self {
-        Self { digest }
-    }
-}
-
-impl PageId {
-    pub(crate) fn from_content(s: &str) -> Self {
-        Self {
-            digest: Sha256::new().chain(s).finalize(),
-        }
-    }
-}
-
-impl serde::ser::Serialize for PageId {
-    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        serializer.collect_str(hex::encode(self.digest).as_str())
-    }
-}
-
-impl std::fmt::Display for PageId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", hex::encode(self.digest))
-    }
-}
-
-#[derive(Debug, Clone)]
-struct RenderItem {
-    linkmarker: PageId,
-    page: PageWrapping,
-}
-
-#[derive(askama::Template)]
-#[template(path = "template.html", escape = "none")]
-struct Temple {
-    /// First page is the root.
-    pages: Vec<RenderItem>,
 }
 
 fn main() -> Result<()> {
