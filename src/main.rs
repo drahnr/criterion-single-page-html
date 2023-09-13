@@ -6,6 +6,7 @@ use fs_err as fs;
 use html5ever::tendril::{StrTendril, TendrilSink};
 use html5ever::tree_builder::QuirksMode;
 use html5ever::{Attribute, ParseOpts};
+use indexmap::IndexSet;
 use markup5ever_rcdom::{Node, NodeData, RcDom};
 use sha2::digest::generic_array::GenericArray;
 use sha2::digest::typenum::U32;
@@ -56,10 +57,10 @@ pub fn load_string_from_disk(
     Ok(s)
 }
 
-pub fn extract_title(base: &Rc<Node>) -> Option<String> {
+pub fn extract_html_title(base: &Rc<Node>) -> Option<String> {
     let mut maybe_title = None;
     extract_xml_node(base, |name: &str, nd: &Rc<Node>| {
-        if let "title" | "h1" | "h2" | "h3" = name {
+        if let "title" = name {
             match nd.children.borrow().iter().next().map(|node| &node.data) {
                 Some(NodeData::Text { contents }) => {
                     let cb = dbg!(contents.borrow());
@@ -74,6 +75,34 @@ pub fn extract_title(base: &Rc<Node>) -> Option<String> {
     maybe_title
 }
 
+pub fn extract_svg_title(base: &Rc<Node>) -> Option<String> {
+    let mut set = IndexSet::new();
+    extract_xml_node(base, |name: &str, nd: &Rc<Node>| {
+        if let "title" | "text" = name {
+            // in svgs all relevant things contain a `<tspan>` inner as the only inner element.
+            let maybe_inner = nd.children.borrow();
+            let maybe_inner = maybe_inner.iter().next();
+            if let Some(inner) = maybe_inner.cloned() {
+                let maybe_inner_data = inner.children.borrow();
+                let maybe_inner_data_first =
+                    maybe_inner_data.iter().next().map(|inner| &inner.data);
+                match maybe_inner_data_first {
+                    Some(NodeData::Text { contents }) => {
+                        let cb = contents.borrow();
+                        let _ = set.insert(dbg!(cb.to_string()));
+                        return Act::Next;
+                    }
+                    _x => {}
+                }
+            }
+        }
+        Act::Next
+    });
+    set.retain(|x| !x.starts_with("Point estimate") && !x.starts_with("gnuplot_"));
+    // specific to criterion, the last one is the actual name
+    set.first().cloned()
+}
+
 pub fn extract_body(base: &Rc<Node>) -> Option<Rc<Node>> {
     let mut maybe_body = None;
     extract_xml_node(base, |name: &str, nd: &Rc<Node>| {
@@ -86,6 +115,7 @@ pub fn extract_body(base: &Rc<Node>) -> Option<Rc<Node>> {
     maybe_body
 }
 
+/// Iteration action to do, based on keywords or to process the `next` iteration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Act {
     Break,
@@ -155,7 +185,7 @@ fn process_html_page(
         .from_utf8()
         .read_from(&mut cursor)?;
 
-    let maybe_title = extract_title(&doc.document);
+    let maybe_title = extract_html_title(&doc.document);
 
     let title = if let Some(title) = maybe_title {
         log::debug!("Found title: \"{}\"", &title);
@@ -167,16 +197,16 @@ fn process_html_page(
 
     let maybe_body = extract_body(&doc.document);
 
-    let Some(node) = maybe_body else {
+    let Some(body_node) = maybe_body else {
         color_eyre::eyre::bail!(
             "Couldn't find <body> in the file: {}",
             current_html_file.display()
         );
     };
 
-    let section_root_node = node.clone();
+    let section_root_node = body_node.clone();
     let mut queue = VecDeque::<Rc<Node>>::new();
-    queue.push_back(node);
+    queue.push_back(body_node);
     assert_eq!(queue.len(), 1);
 
     while let Some(node) = queue.pop_back() {
@@ -306,7 +336,7 @@ fn process_html_page(
                                             .from_utf8()
                                             .read_from(&mut cursor)?;
 
-                                            extract_title(&doc.document)
+                                            extract_svg_title(&doc.document)
                                         };
                                         pages.insert(
                                             linked_page_id,

@@ -276,6 +276,7 @@ dependencies = [
  "fs-err",
  "hex",
  "html5ever",
+ "indexmap",
  "log",
  "markup5ever_rcdom",
  "pretty_env_logger",
