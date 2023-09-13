@@ -1,6 +1,6 @@
 [package]
 name = "criterion-single-page-html"
-version = "0.0.1"
+version = "0.0.2"
 edition = "2021"
 author = "Bernhard Schuster <bernhard@ahoi.io>"
 license = "MIT OR Apache-2.0 OR MPL-2.0"

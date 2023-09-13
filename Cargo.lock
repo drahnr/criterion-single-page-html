@@ -267,7 +267,7 @@ dependencies = [
 
 [[package]]
 name = "criterion-single-page-html"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "askama",
  "base64",
